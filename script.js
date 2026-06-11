@@ -6,9 +6,10 @@ const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)
 
 /* ============================================================
    1. Hero flow-diagram canvas
-   Small drifting dots; near the cursor they wake up and
-   connect into user-flow / system-diagram shapes (nodes,
-   connectors, arrows, labels).
+   A static, evenly spaced grid of very faint dots. Near the
+   cursor, a sparse subset of dots wakes up and connects into
+   user-flow / system-diagram shapes (nodes, connectors,
+   arrows). No idle animation — the grid is perfectly still.
    ============================================================ */
 (function heroCanvas() {
   const canvas = document.getElementById("flow-canvas");
@@ -24,9 +25,12 @@ const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)
   const ORANGE = "255, 106, 43";
   const WHITE = "237, 237, 238";
 
-  const CONNECT_RADIUS = 260;   // cursor influence radius
-  const LINK_DIST = 190;        // max distance between linked nodes
-  const MAX_LINKS_PER_NODE = 3;
+  const GRID_GAP = 34;          // spacing between grid dots
+  const IDLE_ALPHA = 0.14;      // how faint the resting grid is
+  const NODE_RATIO = 0.16;      // share of dots that can become flow nodes
+  const CONNECT_RADIUS = 240;   // cursor influence radius
+  const LINK_DIST = 150;        // max distance between linked nodes
+  const MAX_LINKS_PER_NODE = 2;
 
   // Node archetypes — evoke flowchart vocabulary
   const SHAPES = ["circle", "circle", "circle", "square", "diamond"];
@@ -42,18 +46,31 @@ const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)
     spawn();
   }
 
+  // deterministic hash so the same grid cell is always the same
+  // kind of dot across resizes
+  function cellRand(col, row, salt) {
+    const n = Math.sin(col * 127.1 + row * 311.7 + salt * 74.7) * 43758.5453;
+    return n - Math.floor(n);
+  }
+
   function spawn() {
-    const count = Math.max(34, Math.min(72, Math.floor((W * H) / 26000)));
-    particles = Array.from({ length: count }, () => ({
-      x: Math.random() * W,
-      y: Math.random() * H,
-      vx: (Math.random() - 0.5) * 0.18,
-      vy: (Math.random() - 0.5) * 0.18,
-      r: 1.1 + Math.random() * 1.5,
-      shape: SHAPES[Math.floor(Math.random() * SHAPES.length)],
-      phase: Math.random() * Math.PI * 2,     // twinkle offset
-      energy: 0,                              // 0 = idle dot, 1 = active node
-    }));
+    particles = [];
+    const cols = Math.ceil(W / GRID_GAP);
+    const rows = Math.ceil(H / GRID_GAP);
+    const offX = (W - (cols - 1) * GRID_GAP) / 2;
+    const offY = (H - (rows - 1) * GRID_GAP) / 2;
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const isNode = cellRand(col, row, 1) < NODE_RATIO;
+        particles.push({
+          x: offX + col * GRID_GAP,
+          y: offY + row * GRID_GAP,
+          isNode,
+          shape: SHAPES[Math.floor(cellRand(col, row, 2) * SHAPES.length)],
+          energy: 0,            // 0 = idle dot, 1 = active node
+        });
+      }
+    }
   }
 
   function drawNodeShape(p, size, alpha) {
@@ -88,33 +105,47 @@ const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)
     ctx.fill();
   }
 
-  let t = 0;
+  function drawIdleGrid() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = `rgba(${WHITE}, ${IDLE_ALPHA})`;
+    for (const p of particles) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  let resting = false; // grid already drawn static, nothing animating
 
   function frame() {
-    t += 0.016;
-    ctx.clearRect(0, 0, W, H);
-
-    // --- update particles ---
+    // --- update energy ---
+    let totalEnergy = 0;
     for (const p of particles) {
-      p.x += p.vx;
-      p.y += p.vy;
-      if (p.x < -20) p.x = W + 20;
-      if (p.x > W + 20) p.x = -20;
-      if (p.y < -20) p.y = H + 20;
-      if (p.y > H + 20) p.y = -20;
-
-      const dx = p.x - mouse.x;
-      const dy = p.y - mouse.y;
-      const dist = Math.hypot(dx, dy);
+      const dist = Math.hypot(p.x - mouse.x, p.y - mouse.y);
       const target = mouse.active && dist < CONNECT_RADIUS
         ? 1 - dist / CONNECT_RADIUS
         : 0;
       // smooth wake-up / cool-down
-      p.energy += (target - p.energy) * (target > p.energy ? 0.08 : 0.035);
+      p.energy += (target - p.energy) * (target > p.energy ? 0.1 : 0.05);
+      if (p.energy < 0.004) p.energy = 0;
+      totalEnergy += p.energy;
     }
 
-    // --- links between energised nodes (the "diagram") ---
-    const active = particles.filter((p) => p.energy > 0.06);
+    // nothing happening → draw the still grid once and go to sleep
+    if (!mouse.active && totalEnergy < 0.01) {
+      if (!resting) {
+        drawIdleGrid();
+        resting = true;
+      }
+      requestAnimationFrame(frame);
+      return;
+    }
+    resting = false;
+
+    drawIdleGrid();
+
+    // --- flow links between energised node-dots (the "diagram") ---
+    const active = particles.filter((p) => p.isNode && p.energy > 0.08);
     const linkCount = new Map();
 
     for (let i = 0; i < active.length; i++) {
@@ -136,7 +167,7 @@ const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)
         linkCount.set(b, lb + 1);
 
         const strength = Math.min(a.energy, b.energy) * (1 - d / LINK_DIST);
-        const alpha = strength * 0.8;
+        const alpha = strength * 0.9;
         if (alpha < 0.02) continue;
 
         ctx.strokeStyle = `rgba(${ORANGE}, ${alpha})`;
@@ -147,29 +178,23 @@ const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)
         ctx.stroke();
 
         // directional arrow on stronger links → reads as a user flow
-        if (strength > 0.32) drawArrow(a.x, a.y, b.x, b.y, alpha * 1.4);
+        if (strength > 0.3) drawArrow(a.x, a.y, b.x, b.y, alpha * 1.4);
       }
     }
 
-    // --- dots / nodes ---
+    // --- energised dots bloom into flowchart nodes ---
     for (const p of particles) {
-      const twinkle = 0.55 + 0.45 * Math.sin(t * 0.8 + p.phase);
-      const idleAlpha = 0.16 + twinkle * 0.14;
       const e = p.energy;
+      if (e < 0.05) continue;
 
-      // base dot
-      const dotAlpha = idleAlpha + e * 0.7;
-      ctx.fillStyle = e > 0.25
-        ? `rgba(${ORANGE}, ${dotAlpha})`
-        : `rgba(${WHITE}, ${dotAlpha})`;
+      ctx.fillStyle = `rgba(${ORANGE}, ${Math.min(IDLE_ALPHA + e * 0.75, 0.85)})`;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r + e * 1.2, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 1 + e * (p.isNode ? 1.4 : 0.5), 0, Math.PI * 2);
       ctx.fill();
 
       // flowchart node outline blooms as the dot wakes up
-      if (e > 0.18) {
-        const ring = (p.r + 3) + e * 6;
-        drawNodeShape(p, ring, e * 0.5);
+      if (p.isNode && e > 0.15) {
+        drawNodeShape(p, 4 + e * 5, e * 0.55);
       }
     }
 
@@ -187,7 +212,11 @@ const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)
     mouse.active = false;
   }
 
-  window.addEventListener("resize", resize);
+  window.addEventListener("resize", () => {
+    resize();
+    resting = false;
+    if (prefersReducedMotion) drawIdleGrid();
+  });
   window.addEventListener("mousemove", onMove, { passive: true });
   hero.addEventListener("mouseleave", onLeave);
 
@@ -195,13 +224,7 @@ const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)
   if (!prefersReducedMotion) {
     requestAnimationFrame(frame);
   } else {
-    // static dots only
-    for (const p of particles) {
-      ctx.fillStyle = `rgba(${WHITE}, 0.22)`;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    drawIdleGrid();
   }
 })();
 
